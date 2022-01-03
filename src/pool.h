@@ -12,13 +12,14 @@ struct pool {
 	unsigned   esize;    // one element size in bytes
 	unsigned   ecount;   // element count. 2^(k+5)
 	unsigned * bit_array;// bits
-	void     * elemnt;   // element
+	void     * element;   // element
+	unsigned   used;     // remove it once CBT is enabled.
 	struct cbt cbt;
 };
 
-struct pool * pool_init  (unsigned order);
+struct pool * pool_init  (unsigned order, unsigned esize);
 void   pool_fini  (struct pool *);
 void * pool_alloc (struct pool *);
-void   pool_free  (struct pool *, void *ptr);
+int    pool_free  (struct pool *, void *ptr);
 
 #endif
