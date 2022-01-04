@@ -9,13 +9,6 @@
 #include "bsd-tree.h"
 #include "pool.h"
 
-/* void * malloc(size_t size); */
-/* void   free(void *ptr); */
-/* void * calloc(size_t nmemb, size_t size); */
-/* void * realloc(void *ptr, size_t size); */
-/* void * reallocarray(void *ptr, size_t nmemb, size_t size); */
-
-
 struct mo_rbnode {
 	RB_ENTRY(mo_rbnode)  entry;
 	struct {
@@ -266,7 +259,6 @@ realloc(void *p, size_t const nbytes)
 #ifdef MALLOC_TEST
 
 int main() {
-	
 	size_t i, size, NUM= 500000; //100000;
 	char ** ptr;
 	ptr = (char **)mo_malloc(sizeof(char *)*NUM, __FUNCTION__);
@@ -293,7 +285,7 @@ int main() {
 				ptr[i][0] = 0;
 				ptr[i][size-1] = 0;
 			}
-		#if 1	
+		#if 1
 			int k = random() % (i+1);
 			if (ptr[k]) {
 				mo_free(ptr[k]);
@@ -302,7 +294,7 @@ int main() {
 		#else
 			mo_free(ptr[i]);
 			ptr[i] = NULL;
-		#endif	
+		#endif
 		}
 		for (i=0; i<NUM; i++) {
 			if (ptr[i]) {

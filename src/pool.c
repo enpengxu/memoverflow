@@ -5,9 +5,10 @@
 #include <pthread.h>
 #include "pool.h"
 
+/* TODO */
 #define log_error(...)
 
-
+/* TODO */
 #ifdef CBT_ENABLE
 static int
 cbt_alloc(struct cbt * cbt)
