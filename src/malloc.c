@@ -3,9 +3,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <errno.h>
 #include <sys/mman.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <limits.h>
 #include "bsd-tree.h"
 #include "pool.h"
 
@@ -23,7 +26,7 @@ struct mo_rbnode {
 };
 
 static int
-chunk_ptr_cmp(struct mo_rbnode * p1, struct mo_rbnode * p2)
+mo_rbnode_ptr_cmp(struct mo_rbnode * p1, struct mo_rbnode * p2)
 {
 	if (p1->user.ptr < p2->user.ptr) return -1;
 	if (p1->user.ptr > p2->user.ptr) return  1;
@@ -31,8 +34,8 @@ chunk_ptr_cmp(struct mo_rbnode * p1, struct mo_rbnode * p2)
 }
 
 RB_HEAD(mo_rbnode_ptrtree, mo_rbnode);
-RB_PROTOTYPE(mo_rbnode_ptrtree, mo_rbnode, entry, chunk_ptr_cmp);
-RB_GENERATE(mo_rbnode_ptrtree, mo_rbnode, entry, chunk_ptr_cmp);
+RB_PROTOTYPE(mo_rbnode_ptrtree, mo_rbnode, entry, mo_rbnode_ptr_cmp);
+RB_GENERATE (mo_rbnode_ptrtree, mo_rbnode, entry, mo_rbnode_ptr_cmp);
 
 struct mo_ctx {
 	pthread_mutex_t rb_mutex;
@@ -48,6 +51,7 @@ static struct mo_ctx mo_ctx = {
 };
 
 static pthread_once_t mo_once = PTHREAD_ONCE_INIT;
+static size_t sys_pagesize = 4096;
 
 static void
 mo_init(void)
@@ -61,6 +65,8 @@ mo_init(void)
 
 	mo_ctx.pool = pool_init(order, sizeof(struct mo_rbnode));
 	assert(mo_ctx.pool);
+
+	sys_pagesize = (size_t)sysconf(_SC_PAGESIZE);
 }
 
 static struct mo_rbnode *
@@ -96,7 +102,7 @@ mo_page_alloc(size_t pages)
 	int rc;
 
 	void * ptr = mmap(NULL,
-					  (1+pages)*4096,
+					  (1+pages)*sys_pagesize,
 					  PROT_READ|PROT_WRITE,
 					  MAP_PRIVATE|MAP_ANONYMOUS,
 					  -1, //NOFD,
@@ -105,7 +111,7 @@ mo_page_alloc(size_t pages)
 	if (ptr == MAP_FAILED) {
 		return NULL;
 	}
-	rc = mprotect(ptr+pages*4096, 4096, PROT_NONE); //PROT_READ|PROT_WRITE); //
+	rc = mprotect(ptr+pages*sys_pagesize, sys_pagesize, PROT_NONE); //PROT_READ|PROT_WRITE); //
 	if (rc) {
 		fprintf(stderr, "mprotect failed. errno=%d \n", errno);
 		assert(0 && "mprotect failed");
@@ -119,13 +125,11 @@ mo_page_free(struct mo_rbnode * node)
 {
 	int rc;
 	assert(node);
-	/* rc = mprotect(node->pages.ptr + (node->pages.num-1)*4096, */
-	/* 			  4096, PROT_READ|PROT_WRITE); */
-	/* assert(rc == 0); */
-	rc = munmap(node->pages.ptr, node->pages.num*4096);
+	rc = munmap((void *)node->pages.ptr, node->pages.num * sys_pagesize);
 	if (rc) {
 		fprintf(stderr, "munmap failed. errno=%d \n", errno);
 	}
+	return rc;
 }
 
 static struct mo_rbnode *
@@ -133,7 +137,7 @@ mo_rbnode_find(void * ptr)
 {
 	int rc = 0;
 	struct mo_rbnode f, * r;
-	f.user.ptr = ptr;
+	f.user.ptr = (uintptr_t)ptr;
 
 	rc = pthread_mutex_lock(&mo_ctx.rb_mutex);
 	assert(rc == 0);
@@ -161,12 +165,12 @@ mo_malloc(size_t size, const char * info)
 	// align to 4 bytes(int)
 	assert(size > 0);
 	size_t size1 = (size + 3) & ~3U;
-	size_t pages = (unsigned)(size1 + 4095U) / 4096U;
+	size_t pages = (unsigned)(size1 + sys_pagesize-1) / sys_pagesize;
 
 	void * ptr = mo_page_alloc(pages);
-	unsigned off = pages*4096 - size1;
+	unsigned off = pages*sys_pagesize - size1;
 
-	node->pages.ptr	 = (uintptr_t)ptr;
+	node->pages.ptr   = (uintptr_t)ptr;
 	node->pages.num  = 1 + pages;
 	node->user.ptr   = (uintptr_t)ptr + off;
 	node->user.info  = info;
@@ -176,7 +180,7 @@ mo_malloc(size_t size, const char * info)
 	RB_INSERT(mo_rbnode_ptrtree, &mo_ctx.ptr_tree, node);
 	rc = pthread_mutex_unlock(&mo_ctx.rb_mutex);
 
-	return node->user.ptr;
+	return (void *)node->user.ptr;
 }
 
 static void

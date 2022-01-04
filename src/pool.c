@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <pthread.h>
 #include "pool.h"
@@ -209,6 +210,8 @@ pool_free(struct pool *pool, void * e)
 }
 
 #ifdef POOL_TEST
+#include <stdlib.h>
+#include <stdio.h>
 
 static void
 pool_test()
