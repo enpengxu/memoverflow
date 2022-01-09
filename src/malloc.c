@@ -46,10 +46,9 @@ RB_HEAD(mo_rbnode_ptr_tree, mo_rbnode);
 RB_PROTOTYPE(mo_rbnode_ptr_tree, mo_rbnode, ptr_entry, mo_rbnode_ptr_cmp);
 RB_GENERATE (mo_rbnode_ptr_tree, mo_rbnode, ptr_entry, mo_rbnode_ptr_cmp);
 
-RB_HEAD(mo_rbnode_pages_tree, mo_rbnode);
-RB_PROTOTYPE(mo_rbnode_pages_tree, mo_rbnode, page_entry, mo_rbnode_page_cmp);
-RB_GENERATE (mo_rbnode_pages_tree, mo_rbnode, page_entry, mo_rbnode_page_cmp);
-
+RB_HEAD(mo_rbnode_page_tree, mo_rbnode);
+RB_PROTOTYPE(mo_rbnode_page_tree, mo_rbnode, page_entry, mo_rbnode_page_cmp);
+RB_GENERATE (mo_rbnode_page_tree, mo_rbnode, page_entry, mo_rbnode_page_cmp);
 
 struct mo_ctx {
 	int             reuse_memory;
@@ -62,16 +61,14 @@ struct mo_ctx {
 	} ptr_tree;
 	struct {
 		pthread_mutex_t             mutex;
-		struct mo_rbnode_pages_tree tree;
+		struct mo_rbnode_page_tree tree;
 	} page_tree;
 };
-
 
 static struct mo_ctx mo_ctx = {
 	.reuse_memory = 1,
 	.pool       = NULL,
 	.pool_mutex = PTHREAD_MUTEX_INITIALIZER,
-
 	.ptr_tree = {
 		.mutex  = PTHREAD_MUTEX_INITIALIZER,
 		.tree   = RB_INITIALIZER(NULL),
@@ -82,8 +79,8 @@ static struct mo_ctx mo_ctx = {
 	},
 };
 
-static pthread_once_t mo_once = PTHREAD_ONCE_INIT;
 static size_t sys_pagesize = 4096;
+static pthread_once_t mo_once = PTHREAD_ONCE_INIT;
 
 static void
 mo_init(void)
@@ -99,7 +96,7 @@ mo_init(void)
 	if (env) {
 		mo_ctx.reuse_memory = atoi(env);
 	}
-	
+
 	mo_ctx.pool = pool_init(order, sizeof(struct mo_rbnode));
 	assert(mo_ctx.pool);
 
@@ -132,6 +129,30 @@ mo_rbnode_free(struct mo_rbnode *node)
 
 	return r;
 }
+
+#define mo_rbnode_find(_tree, node, remove)							\
+	({																	\
+		int rc = 0;													\
+		struct mo_rbnode * r;											\
+		rc = pthread_mutex_lock(&mo_ctx._tree.mutex);					\
+		assert(rc == 0);												\
+		r = RB_FIND(mo_rbnode_##_tree, &mo_ctx._tree.tree, &node);		\
+		if (r && (remove))												\
+			RB_REMOVE(mo_rbnode_##_tree, &mo_ctx._tree.tree, r);		\
+		rc = pthread_mutex_unlock(&mo_ctx._tree.mutex);				\
+		assert(rc == 0);												\
+		r;																\
+	})
+
+#define mo_rbnode_insert(_tree, node)									\
+	{																	\
+		int rc;														\
+		rc = pthread_mutex_lock(&mo_ctx._tree.mutex);					\
+		assert(rc == 0);												\
+		RB_INSERT(mo_rbnode_##_tree, &mo_ctx._tree.tree, node);		\
+		rc = pthread_mutex_unlock(&mo_ctx._tree.mutex);				\
+		assert(rc == 0);												\
+	}
 
 static void *
 mo_page_alloc(size_t pages)
@@ -169,65 +190,6 @@ mo_page_free(struct mo_rbnode * node)
 	return rc;
 }
 
-#define mo_node_find_remove(_tree, key)		\
-	({											\
-		int rc = 0; \
-		struct mo_rbnode f, * r;								 \
-		f.user.ptr = (uintptr_t)ptr;							 \
-		rc = pthread_mutex_lock(&(_tree).mutex);				 \
-		assert(rc == 0);										 \
-		r = RB_FIND(mo_rbnode_ptr_tree, &(_tree).tree, &f);		 \
-		if (r)													 \
-			RB_REMOVE(mo_rbnode_ptr_tree, &(_tree).tree, r);	 \
-		rc = pthread_mutex_unlock(&(_tree).mutex);				 \
-		assert(rc == 0);										 \
-		r;														 \
-	})
-
-
-static struct mo_rbnode *
-mo_rbnode_find(void * ptr, int remove)
-{
-	//return mo_node_find_remove(mo_ctx.ptr_tree, ptr);
-		
-	int rc = 0;
-	struct mo_rbnode f, * r;
-	f.user.ptr = (uintptr_t)ptr;
-
-	rc = pthread_mutex_lock(&mo_ctx.ptr_tree.mutex);
-	assert(rc == 0);
-	r = RB_FIND(mo_rbnode_ptr_tree, &mo_ctx.ptr_tree.tree, &f);
-	if (r && remove) {
-		RB_REMOVE(mo_rbnode_ptr_tree, &mo_ctx.ptr_tree.tree, r);
-	}
-	rc = pthread_mutex_unlock(&mo_ctx.ptr_tree.mutex);
-	assert(rc == 0);
-
-	return r;
-}
-
-static struct mo_rbnode *
-mo_pagetree_alloc(int pages)
-{
-	//return mo_node_find_remove(mo_ctx.page_tree, pages);
-
-	int rc = 0;
-	struct mo_rbnode f, * r;
-	f.pages.num = pages;
-
-	rc = pthread_mutex_lock(&mo_ctx.page_tree.mutex);
-	assert(rc == 0);
-	r = RB_FIND(mo_rbnode_pages_tree, &mo_ctx.page_tree.tree, &f);
-	if (r) {
-		RB_REMOVE(mo_rbnode_pages_tree, &mo_ctx.page_tree.tree, r);
-	}
-	rc = pthread_mutex_unlock(&mo_ctx.page_tree.mutex);
-	assert(rc == 0);
-
-	return r;
-}
-
-
 static void *
 mo_malloc(size_t size, const char * info)
 {
@@ -237,7 +199,6 @@ mo_malloc(size_t size, const char * info)
 	if (!mo_ctx.pool) {
 		return NULL;
 	}
-
 	// align to 4 bytes(int)
 	assert(size > 0);
 	size_t size1 = (size + 3) & ~3U;
@@ -245,12 +206,13 @@ mo_malloc(size_t size, const char * info)
 	unsigned off = pages*sys_pagesize - size1;
 
 	// try to alloc from pages_tree first.
+	struct mo_rbnode f = { .pages.num = pages + 1 };
 	struct mo_rbnode * node;
-	node = mo_pagetree_alloc(pages+1);
+	node = mo_rbnode_find(ptr_tree, f, 1);
 	if (node) {
 		assert(node->pages.ptr && node->pages.num == (1 + pages));
 
-		rc = mprotect((void *)node->pages.ptr, pages*sys_pagesize, PROT_READ|PROT_WRITE); 
+		rc = mprotect((void *)node->pages.ptr, pages*sys_pagesize, PROT_READ|PROT_WRITE);
 		if (rc) {
 			printf("error: failed in mprotect %d\n", errno);
 			exit(-1);
@@ -263,17 +225,13 @@ mo_malloc(size_t size, const char * info)
 		}
 		void * ptr = mo_page_alloc(pages);
 
-		node->pages.ptr   = (uintptr_t)ptr;
+		node->pages.ptr  = (uintptr_t)ptr;
 		node->pages.num  = 1 + pages;
 	}
-	node->user.ptr   = (uintptr_t)node->pages.ptr + off;
 	node->user.info  = info;
 	node->user.size  = size;
-
-	rc = pthread_mutex_lock(&mo_ctx.ptr_tree.mutex);
-	assert(rc == 0);
-	RB_INSERT(mo_rbnode_ptr_tree, &mo_ctx.ptr_tree.tree, node);
-	rc = pthread_mutex_unlock(&mo_ctx.ptr_tree.mutex);
+	node->user.ptr   = (uintptr_t)node->pages.ptr + off;
+	mo_rbnode_insert(ptr_tree, node);
 
 	return (void *)node->user.ptr;
 }
@@ -290,7 +248,8 @@ mo_free(void * ptr)
 		return ;
 	}
 	// find & remove
-	node = mo_rbnode_find(ptr, 1);
+	struct mo_rbnode f = { .user.ptr = (uintptr_t)ptr };
+	node = mo_rbnode_find(ptr_tree, f, 1);
 	if (!node) {
 		assert(0 && "unable to find the ptr");
 		return;
@@ -299,19 +258,15 @@ mo_free(void * ptr)
 	if (mo_ctx.reuse_memory) {
 		// try to reuse pages.
 		// 1. insert node into pages tree
-		rc = pthread_mutex_lock(&mo_ctx.page_tree.mutex);
-		assert(rc == 0);
-		RB_INSERT(mo_rbnode_pages_tree, &mo_ctx.page_tree.tree, node);
-		rc = pthread_mutex_unlock(&mo_ctx.page_tree.mutex);
-		assert(rc == 0);
-
+		mo_rbnode_insert(page_tree, node);
+		// 2. change ptr to rw
 		rc = mprotect((void *)node->pages.ptr, (node->pages.num-1)*sys_pagesize, PROT_NONE);
 		assert(rc ==0);
 		if (rc) {
-			printf("mprotect failed: errno %d\n", errno); 
+			printf("mprotect failed: errno %d\n", errno);
 			exit(-1);
 		}
-		// 2. keep node in pool
+		// 3. keep node in pool
 	} else {
 		rc = mo_page_free(node);
 		assert(rc == 0);
@@ -350,7 +305,8 @@ realloc(void *p, size_t const nbytes)
 	if (!p) {
 		return mo_malloc(nbytes, NULL);
 	}
-	struct mo_rbnode * node = mo_rbnode_find(p, 0);
+	struct mo_rbnode f = { .user.ptr = (uintptr_t)p };
+	struct mo_rbnode * node = mo_rbnode_find(ptr_tree, f, 0);
 	if (!node) {
 		return NULL;
 	}
